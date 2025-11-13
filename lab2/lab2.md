@@ -57,9 +57,10 @@
 
 ```python
 import torch
-import torchvision
+import torchvision as models
+from torchvision.models import ResNet50_Weights
 
-model = torchvision.models.resnet50(pretrained=True)
+model = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
 model.eval()
 ```
 
@@ -93,9 +94,132 @@ _, predicted_idx = torch.max(output, 1)
 print(f"Predicted class index: {predicted_idx.item()}")
 ```
 
+## 模型结构的修改
+
+在某些情况下，我们可能需要对预训练模型的结构进行修改，例如更改最后的全连接层以适应不同的分类任务；或者加入一些自定义的层以增强模型的能力。
+
+下面以 ResNet50 为例，在最后的 Bottleneck 块与其之后的全局平均池化层之间，插入一个卷积层、一个批归一化层、一个 Relu 层，来介绍修改模型结构的一种方法。
+
+为了简洁明了，创建一个 class 来表示修改后的模型：
+
+```python
+class ResNet50WithExtraConv(nn.Module):
+    def __init__(self, extra_conv_channels=128):
+        super().__init__()
+        original = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+        self.conv1 = original.conv1
+        self.bn1 = original.bn1
+        self.relu = original.relu
+        self.maxpool = original.maxpool
+        self.layer1 = original.layer1
+        self.layer2 = original.layer2
+        self.layer3 = original.layer3
+        self.layer4 = original.layer4
+
+        # 新插入的三层
+        # 注意：这里插入的卷积层的权重参数为随机生成，并且没有偏置项
+        self.extra_conv = nn.Conv2d(2048, extra_conv_channels, 3, 1, 1, bias=False)
+        self.extra_bn = nn.BatchNorm2d(extra_conv_channels)
+        self.extra_relu = nn.ReLU(inplace=True)
+
+        self.avgpool = original.avgpool
+        self.fc = nn.Linear(extra_conv_channels, 1000)
+
+    def forward(self, x):
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.maxpool(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.extra_relu(self.extra_bn(self.extra_conv(x)))
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return x
+```
+
+然后就可以通过这个 class 来对修改后的模型做一些操作。
+
+我们将其保存为 pth、onnx 两种格式的模型文件：
+
+```python
+model = ResNet50WithExtraConv()
+
+torch.save(model, 'modified_resnet50_full.pth')
+print("完整模型已保存: modified_resnet50_full.pth")
+
+dummy_input = torch.randn(1, 3, 224, 224)
+torch.onnx.export(model, (dummy_input, ), 'modified_resnet50.onnx', verbose=True, input_names=['input'], output_names=['output'])
+print("ONNX 文件已导出: modified_resnet50.onnx")
+```
+
+> 对于 onnx 格式的模型文件，可以通过 [NETRON](https://netron.app/) 来可视化得查看模型结构。
+
+如果需要重新训练模型，以在我们新插入的层中得到合适的参数，而不修改原有层中的参数，可以先冻结原有层：
+
+```python
+for param in model.conv1.parameters():
+    param.requires_grad = False
+for param in model.bn1.parameters():
+    param.requires_grad = False
+for param in model.maxpool.parameters():
+    param.requires_grad = False
+for param in model.layer1.parameters():
+    param.requires_grad = False
+for param in model.layer2.parameters():
+    param.requires_grad = False
+for param in model.layer3.parameters():
+    param.requires_grad = False
+for param in model.layer4.parameters():
+    param.requires_grad = False
+for param in model.avgpool.parameters():
+    param.requires_grad = False
+```
+
+然后训练即可：
+
+```python
+from torchvision.datasets import ImageNet
+from torch.utils.data import DataLoader
+
+# 这里的数据集已经下载到了本地的 ./imagenet 目录下
+train_dataset = ImageNet(root='./imagenet', split='train', transform=transform)
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
+
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-3)
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model.to(device)
+
+num_epochs = 5
+model.train()
+for epoch in range(num_epochs):
+    running_loss = 0.0
+    for inputs, labels in train_loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        running_loss += loss.item()
+
+    print(f"Epoch {epoch+1}/{num_epochs}, Loss: {running_loss / len(train_loader):.4f}")
+
+print("训练完成！")
+```
+
+训练完成后重新测试模型性能。
+
 ## 实验内容
 
-### 4.1 实验任务
+### 5.1 实验任务
+
+#### 5.1.1 必做部分
 
 请根据你的电脑硬件情况，选择一个合适的深度学习模型。推荐选择一些轻量级的模型，如 MobileNet、ResNet、YOLO 等。
 
@@ -115,10 +239,20 @@ print(f"Predicted class index: {predicted_idx.item()}")
 
 > **注意**： 请确保你选择的模型和输入数据适合你的硬件配置，避免出现内存不足等问题。
 
-### 4.2 提交要求
+#### 5.1.2 选做部分
 
-你需要在实验报告中附上你的代码实现思路、测试数据、运行结果截图或者运行结果处理后的图片，以及对实验现象的分析与总结。
+根据你选择的模型，尝试修改其中的经典结构，比如增加或者删除一些层，并进行重新训练，训练后与原模型进行性能对比。
 
+你需要在实验报告中说明你修改了哪些结构，并使用 [NETRON](https://netron.app/) 来可视化展示你修改前后结构对比（局部对比即可），并说明你重新训练使用的数据集以及修改前后模型性能对比。
+
+> **注意**： 请确保你选择的训练数据集适合你的硬件配置，你可以选择下载一些数据集的子集或者自己裁剪数据集以满足硬件配置、时间等的要求。
+
+本次实验完成选做部分可以额外拿到 2 分，连同必做部分共拿到 12 分，
+
+### 5.2 提交要求
+
+你需要在实验报告中附上你的代码实现思路、测试数据、运行结果截图或者运行结果处理后的图片，修改后的模型的 pth 文件（如果你完成了选做部分的话），以及对实验现象的分析与总结。
+    
 请将你的代码文件、测试数据文件、模型输出结果文件（如果存在的话）和实验报告打包到一个 zip ⽂件中（学号_姓名.zip），并将该 zip ⽂件提交到 bb 平台上。
 
-<span style="color:red; font-weight:bold;">提交截⽌时间</span>：北京时间11⽉ 21⽇ 23:59
+<span style="color:red; font-weight:bold;">提交截⽌时间</span>：北京时间11⽉21⽇ 23:59
