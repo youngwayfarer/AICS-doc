@@ -177,6 +177,8 @@ for param in model.avgpool.parameters():
     param.requires_grad = False
 ```
 
+> 如果需要冻结的层数特别多，这部分可以怎样简化？
+
 然后训练即可：
 
 ```python
